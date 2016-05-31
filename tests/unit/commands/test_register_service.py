@@ -38,7 +38,7 @@ class TestRegisterService:
         assert result.output == '\nservice-name service registered\n\n'
 
         _get_accounts_client.assert_called_once_with('accounts-url', 'test@example.com', 'password')
-        _create_service.assert_called_once_with('client', 'organisation-id', 'service-name', 'https://localhost:5000', 'service-type')
+        _create_service.assert_called_once_with('client', 'organisation-id', 'service-name', 'https://localhost:5000', 'service-type', 3)
         _get_client_secret.assert_called_once_with('client', 'service-id')
         _update_local_conf.assert_called_once_with('config', 'service-id', 'secret')
 
@@ -54,14 +54,15 @@ class TestRegisterService:
                                                  '--service_type', 'service-type',
                                                  '--accounts_url', 'accounts-url',
                                                  '--location', 'https://example.com',
-                                                 '--config', 'override-config'])
+                                                 '--config', 'override-config',
+                                                 '--retries', '5'])
 
         assert result.exit_code == 0
         assert result.output == '\nservice-name service registered\n\n'
 
         _get_accounts_client.assert_called_once_with('accounts-url', 'test@example.com', 'password')
         _create_service.assert_called_once_with('client', 'organisation-id', 'service-name', 'https://example.com',
-                                                'service-type')
+                                                'service-type', 5)
         _get_client_secret.assert_called_once_with('client', 'service-id')
         _update_local_conf.assert_called_once_with('override-config', 'service-id', 'secret')
 
@@ -86,7 +87,7 @@ class TestRegisterService:
 
         _get_accounts_client.assert_called_once_with('accounts-url', 'test@example.com', 'password')
         _create_service.assert_called_once_with('client', 'organisation-id', 'service-name', 'https://localhost:5000',
-                                                'service-type')
+                                                'service-type', 3)
         _get_client_secret.assert_called_once_with('client', 'service-id')
         _update_local_conf.assert_called_once_with('config', 'service-id', 'secret')
 
@@ -99,6 +100,18 @@ class TestRegisterService:
                                                  '--location', 'https://example.com'])
         assert result.exit_code == 2
 
+
+    def test_register_service_invalid_retries_value(self):
+        runner = CliRunner()
+        result = runner.invoke(register_service, ['test@example.com', 'password', 'organisation-id',
+                                                  '--name', 'service-name',
+                                                  '--service_type', 'service-type',
+                                                  '--accounts_url', 'accounts-url',
+                                                  '--location', 'https://example.com',
+                                                  '--retries', 'foo'])
+
+        assert result.exit_code == 1
+        assert result.output == 'Error: retries must be an integer\n'
 
     def test_register_service_no_accounts_url(self):
         runner = CliRunner()
@@ -289,6 +302,69 @@ class TestCreateService:
         result = _create_service(client, organisation_id, name, location, service_type)
 
         client.accounts.organisations[organisation_id].services.post.assert_called_once_with(
+            name='service-name', location='https://example.com', service_type='external')
+        assert not _get_service.called
+        assert result == 'service-id'
+
+    @patch('koi.commands._get_service')
+    def test_create_service_500_error_has_retries(self, _get_service):
+        client = MagicMock()
+        organisation_id = 'organisation-id'
+        name = 'service-name'
+        location = 'https://example.com'
+        service_type = 'external'
+
+        client.accounts.organisations = {'organisation-id': MagicMock()}
+        client.accounts.organisations[organisation_id].services.post.side_effect = HTTPError(500, 'Internal Server Error')
+
+        with pytest.raises(HTTPError) as exc:
+            _create_service(client, organisation_id, name, location, service_type, 1)
+
+        assert client.accounts.organisations[organisation_id].services.post.call_count == 2
+        client.accounts.organisations[organisation_id].services.post.assert_called_with(
+            name='service-name', location='https://example.com', service_type='external')
+
+        assert not _get_service.called
+        assert exc.value.message == "HTTP 500: Internal Server Error"
+
+    @patch('koi.commands._get_service')
+    def test_create_service_500_error_no_retries(self, _get_service):
+        client = MagicMock()
+        organisation_id = 'organisation-id'
+        name = 'service-name'
+        location = 'https://example.com'
+        service_type = 'external'
+
+        client.accounts.organisations = {'organisation-id': MagicMock()}
+        client.accounts.organisations[organisation_id].services.post.side_effect = HTTPError(500, 'Internal Server Error')
+
+        with pytest.raises(HTTPError) as exc:
+            _create_service(client, organisation_id, name, location, service_type, 0)
+
+        assert client.accounts.organisations[organisation_id].services.post.call_count == 1
+        client.accounts.organisations[organisation_id].services.post.assert_called_with(
+            name='service-name', location='https://example.com', service_type='external')
+        assert not _get_service.called
+        assert exc.value.message == "HTTP 500: Internal Server Error"
+
+    @patch('koi.commands._get_service')
+    def test_create_service_500_error_then_pass(self, _get_service):
+        client = MagicMock()
+        organisation_id = 'organisation-id'
+        name = 'service-name'
+        location = 'https://example.com'
+        service_type = 'external'
+
+        client.accounts.organisations = {'organisation-id': MagicMock()}
+        client.accounts.organisations[organisation_id].services.post.side_effect = [
+            HTTPError(500, 'Internal Server Error'),
+            {'status': 200, 'data': {'id': 'service-id','name': 'service-name'}}
+        ]
+
+        result = _create_service(client, organisation_id, name, location, service_type, 1)
+
+        assert client.accounts.organisations[organisation_id].services.post.call_count == 2
+        client.accounts.organisations[organisation_id].services.post.assert_called_with(
             name='service-name', location='https://example.com', service_type='external')
         assert not _get_service.called
         assert result == 'service-id'

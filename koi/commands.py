@@ -40,9 +40,10 @@ def load_data():
 @click.option('--accounts_url', help='URL for the accounts service')
 @click.option('--location', help='The url including protocol and port (if required) of service')
 @click.option('--config', help='The configuration directory')
+@click.option('--retries', help='Number of times to retry command on error')
 def register_service(email, password, organisation_id, name=None,
                      service_type=None, accounts_url=None,
-                     location=None, config=None):
+                     location=None, config=None, retries=None):
     """Register a service with the accounts service
 
     \b
@@ -55,6 +56,13 @@ def register_service(email, password, organisation_id, name=None,
     service_type = service_type or getattr(options, 'service_type', None)
     location = location or ('https://localhost:' + str(getattr(options, 'port')))
     config = config or 'config'
+    retries = retries or 3
+
+    try:
+        retries = int(retries)
+    except ValueError:
+        raise click.ClickException(click.style('retries must be an integer',
+                                               fg='red'))
 
     if not accounts_url:
         raise click.ClickException(click.style('accounts_url not defined',
@@ -70,7 +78,7 @@ def register_service(email, password, organisation_id, name=None,
 
     try:
         client = _get_accounts_client(accounts_url, email, password)
-        service_id = _create_service(client, organisation_id, name, location, service_type)
+        service_id = _create_service(client, organisation_id, name, location, service_type, retries)
         client_secret = _get_client_secret(client, service_id)
         _update_local_conf(config, service_id, client_secret)
     except httpclient.HTTPError as exc:
@@ -105,7 +113,7 @@ def _get_accounts_client(accounts_url, email, password):
         raise click.ClickException(click.style(msg, fg='red'))
 
 
-def _create_service(client, organisation_id, name, location, service_type):
+def _create_service(client, organisation_id, name, location, service_type, retries=0):
     """
     Attempt to create service with given details. If service already exists look up existing service.
     :param client: Accounts Service API Client
@@ -113,6 +121,7 @@ def _create_service(client, organisation_id, name, location, service_type):
     :param name: Service Name
     :param location: Service Location
     :param service_type: Service Type
+    :param retries: Number of retries left (default 0)
     :return: Service Id
     """
     try:
@@ -120,11 +129,20 @@ def _create_service(client, organisation_id, name, location, service_type):
             name=name, location=location, service_type=service_type)
         service_id = response['data']['id']
     except httpclient.HTTPError as exc:
-        if exc.code == 404:
-            # If error is a 404 then this means the organisation_id is not recognised. Raise this error immediately
+        # If error is a 500 then this is an unexpected error. Retry if max retries has not been exceeded
+        if exc.code == 500:
+            if retries > 0:
+                service_id = _create_service(client, organisation_id, name, location, service_type, retries-1)
+            else:
+                raise exc
+
+        # If error is a 404 then this means the organisation_id is not recognised. Raise this error immediately
+        elif exc.code == 404:
             msg = ('Organisation {} cannot be found. '
                    'Please check organisation_id.'.format(organisation_id))
             raise click.ClickException(click.style(msg, fg='red'))
+
+        # If error is not 500 or 404, indicates that service has already been created. Look up existing service
         else:
             service_id = _get_service(client, organisation_id, name)
             # If cannot find existing service, raise original error
